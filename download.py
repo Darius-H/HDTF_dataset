@@ -39,8 +39,8 @@ def download_hdtf(source_dir: os.PathLike, output_dir: os.PathLike, num_workers:
         **process_video_kwargs,
      ) for vd in download_queue]
     pool = Pool(processes=num_workers)
-    tqdm_kwargs = dict(total=len(task_kwargs), desc=f'Downloading videos into {output_dir} (note: without sound)')
-
+    tqdm_kwargs = dict(total=len(task_kwargs), desc=f'Downloading videos into {output_dir} (note: with sound)')
+    # 调用task_proxy函数处理
     for _ in tqdm(pool.imap_unordered(task_proxy, task_kwargs), **tqdm_kwargs):
         pass
 
@@ -125,15 +125,17 @@ def download_and_process_video(video_data: Dict, output_dir: str):
         print(f"Downloaded resolution is not correct for {video_data['name']}: {video_resolution} vs {video_data['name']}. Discarding this video.")
         return
 
+    os.makedirs(os.path.join(output_dir,"cropped_video"),exist_ok=True)
     for clip_idx in range(len(video_data['intervals'])):
         start, end = video_data['intervals'][clip_idx]
         clip_name = f'{video_data["name"]}_{clip_idx:03d}'
-        clip_path = os.path.join(output_dir, clip_name + '.mp4')
-        crop_success = cut_and_crop_video(raw_download_path, clip_path, start, end, video_data['crops'][clip_idx])
+        clip_path = os.path.join(output_dir,"cropped_video", clip_name + '.mp4')
+        if not os.path.exists(clip_path):
+            crop_success = cut_and_crop_video(raw_download_path, clip_path, start, end, video_data['crops'][clip_idx])
 
-        if not crop_success:
-            print(f'Failed to cut-and-crop clip #{clip_idx}', video_data)
-            continue
+            if not crop_success:
+                print(f'Failed to cut-and-crop clip #{clip_idx}', video_data)
+                continue
 
 
 def read_file_as_space_separated_data(filepath: os.PathLike) -> Dict:
@@ -160,25 +162,35 @@ def download_video(video_id, download_path, resolution: int=None, video_format="
     Copy-pasted from https://github.com/ytdl-org/youtube-dl
     """
     # if os.path.isfile(download_path): return True # File already exists
-
-    if log_file is None:
-        stderr = subprocess.DEVNULL
-    else:
-        stderr = open(log_file, "a")
-    video_selection = f"bestvideo[ext={video_format}]"
+    video_selection = f"bv[ext={video_format}]"
     video_selection = video_selection if resolution is None else f"{video_selection}[height={resolution}]"
+    video_selection = video_selection + '+ba[ext=m4a]'
+    # command = [
+    #     "youtube-dl",
+    #     "https://youtube.com/watch?v={}".format(video_id), "--quiet", "-f",
+    #     video_selection,
+    #     "--output", download_path,
+    #     "--no-continue"
+    # ]
     command = [
-        "youtube-dl",
-        "https://youtube.com/watch?v={}".format(video_id), "--quiet", "-f",
-        video_selection,
-        "--output", download_path,
-        "--no-continue"
+        "yt-dlp","-f",
+        video_selection,f"https://youtu.be/{video_id}",
+        "-o", download_path,
     ]
-    return_code = subprocess.call(command, stderr=stderr)
+    # print(' '.join(command))
+    if not os.path.exists(download_path):
+        if log_file is None:
+            stderr = subprocess.DEVNULL
+        else:
+            stderr = open(log_file, "a")
+        return_code = subprocess.call(command, stderr=stderr)
+        if log_file is not None:
+            stderr.close()
+    else:
+        return_code = 0
     success = return_code == 0
 
-    if log_file is not None:
-        stderr.close()
+
 
     return success and os.path.isfile(download_path)
 
@@ -216,11 +228,20 @@ def cut_and_crop_video(raw_video_path, output_path, start, end, crop: List[int])
         "-y", # Overwrite if the file exists
         "-ss", str(start), "-to", str(end), # Cut arguments
         "-filter:v", f'"crop={out_w}:{out_h}:{x}:{y}"', # Crop arguments
-        output_path
+        output_path,
     ])
-
+    print(command)
     return_code = subprocess.call(command, shell=True)
-    success = return_code == 0
+    command = ' '.join([
+        "ffmpeg", "-i", raw_video_path,
+        "-strict", "-2", # Some legacy arguments
+        "-loglevel", "quiet", # Verbosity arguments
+        "-y", # Overwrite if the file exists
+        "-ss", str(start), "-to", str(end), # Cut arguments
+        output_path[:-3]+'wav',
+    ])
+    audio_return_code =  subprocess.call(command, shell=True)
+    success = return_code == 0 and audio_return_code == 0
 
     if not success:
         print('Command failed:', command)
